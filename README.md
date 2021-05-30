@@ -60,8 +60,8 @@ python evaluate.py \
 
 ## Performance
 
-![image-20210530200543914](/home/jordan/Pictures/Screenshot from 2021-05-30 20-06-36.png)
+![image-20210530200543914](./images/training_loss.png)
 
 
 
-![Screenshot from 2021-05-30 20-06-36](/home/jordan/Pictures/Screenshot from 2021-05-30 20-06-21.png)
+![Screenshot from 2021-05-30 20-06-36](./images/training_accuracy.png)
