@@ -78,22 +78,6 @@ def scaled_dot_product_attention(q, k, v, mask):
     return output, attention_weights
 
 
-def split_heads(x, d_model, num_heads):
-    # x.shape: (batch_size, seq_len, d_model)
-    batch_size = tf.shape(x)[0]
-
-    assert d_model % num_heads == 0
-    depth = d_model // num_heads
-
-    # (batch_size, seq_len, num_heads, depth)
-    reshaped_x = tf.reshape(x, shape=(batch_size, -1, num_heads, depth))
-
-    # (batch_size, num_heads, seq_len, depth)
-    output = tf.transpose(reshaped_x, perm=[0, 2, 1, 3])
-
-    return output
-
-
 def get_angles(pos, i, d_model):
     angle_rates = 1 / np.power(10000, (2 * (i // 2)) / np.float32(d_model))
     return pos * angle_rates
@@ -129,12 +113,12 @@ class MultiHeadAttention(tf.keras.layers.Layer):
         self.num_heads = num_heads  # 指定要將 `d_model` 拆成幾個 heads
         self.d_model = d_model  # 在 split_heads 之前的基底維度
 
-        assert d_model % self.num_heads == 0  # 前面看過，要確保可以平分
+        assert d_model % self.num_heads == 0  # 確保可以平分
 
         self.depth = d_model // self.num_heads  # 每個 head 裡子詞的新的 repr. 維度
 
         self.wq = tf.keras.layers.Dense(d_model)  # 分別給 q, k, v 的 3 個線性轉換
-        self.wk = tf.keras.layers.Dense(d_model)  # 注意我們並沒有指定 activation func
+        self.wk = tf.keras.layers.Dense(d_model)
         self.wv = tf.keras.layers.Dense(d_model)
 
         self.dense = tf.keras.layers.Dense(d_model)  # 多 heads 串接後通過的線性轉換
@@ -150,77 +134,55 @@ class MultiHeadAttention(tf.keras.layers.Layer):
     def call(self, v, k, q, mask):
         batch_size = tf.shape(q)[0]
 
-        # 將輸入的 q, k, v 都各自做一次線性轉換到 `d_model` 維空間
         q = self.wq(q)  # (batch_size, seq_len, d_model)
         k = self.wk(k)  # (batch_size, seq_len, d_model)
         v = self.wv(v)  # (batch_size, seq_len, d_model)
 
-        # 前面看過的，將最後一個 `d_model` 維度分成 `num_heads` 個 `depth` 維度
         q = self.split_heads(q, batch_size)  # (batch_size, num_heads, seq_len_q, depth)
         k = self.split_heads(k, batch_size)  # (batch_size, num_heads, seq_len_k, depth)
         v = self.split_heads(v, batch_size)  # (batch_size, num_heads, seq_len_v, depth)
 
-        # 利用 broadcasting 讓每個句子的每個 head 的 qi, ki, vi 都各自進行注意力機制
-        # 輸出會多一個 head 維度
         scaled_attention, attention_weights = scaled_dot_product_attention(
             q, k, v, mask)
         # scaled_attention.shape == (batch_size, num_heads, seq_len_q, depth)
         # attention_weights.shape == (batch_size, num_heads, seq_len_q, seq_len_k)
 
-        # 跟我們在 `split_heads` 函式做的事情剛好相反，先做 transpose 再做 reshape
-        # 將 `num_heads` 個 `depth` 維度串接回原來的 `d_model` 維度
         scaled_attention = tf.transpose(scaled_attention, perm=[0, 2, 1, 3])
         # (batch_size, seq_len_q, num_heads, depth)
         concat_attention = tf.reshape(scaled_attention, (batch_size, -1, self.d_model))
         # (batch_size, seq_len_q, d_model)
 
-        # 通過最後一個線性轉換
         output = self.dense(concat_attention)  # (batch_size, seq_len_q, d_model)
 
         return output, attention_weights
 
 
-# Encoder 裡頭會有 N 個 EncoderLayers，而每個 EncoderLayer 裡又有兩個 sub-layers: MHA & FFN
 class EncoderLayer(tf.keras.layers.Layer):
-    # Transformer 論文內預設 dropout rate 為 0.1
     def __init__(self, d_model, num_heads, dff, rate=0.1):
         super(EncoderLayer, self).__init__()
 
         self.mha = MultiHeadAttention(d_model, num_heads)
         self.ffn = point_wise_feed_forward_network(d_model, dff)
 
-        # layer norm 很常在 RNN-based 的模型被使用。一個 sub-layer 一個 layer norm
         self.layernorm1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
         self.layernorm2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
 
-        # 一樣，一個 sub-layer 一個 dropout layer
         self.dropout1 = tf.keras.layers.Dropout(rate)
         self.dropout2 = tf.keras.layers.Dropout(rate)
 
-    # 需要丟入 `training` 參數是因為 dropout 在訓練以及測試的行為有所不同
     def call(self, x, training, mask):
-        # 除了 `attn`，其他張量的 shape 皆為 (batch_size, input_seq_len, d_model)
-        # attn.shape == (batch_size, num_heads, input_seq_len, input_seq_len)
-
-        # sub-layer 1: MHA
-        # Encoder 利用注意機制關注自己當前的序列，因此 v, k, q 全部都是自己
-        # 另外別忘了我們還需要 padding mask 來遮住輸入序列中的 <pad> token
         attn_output, attn = self.mha(x, x, x, mask)
         attn_output = self.dropout1(attn_output, training=training)
         out1 = self.layernorm1(x + attn_output)
 
-        # sub-layer 2: FFN
         ffn_output = self.ffn(out1)
-        ffn_output = self.dropout2(ffn_output, training=training)  # 記得 training
+        ffn_output = self.dropout2(ffn_output, training=training)
         out2 = self.layernorm2(out1 + ffn_output)
 
         return out2
 
 
 class Encoder(tf.keras.layers.Layer):
-    # Encoder 的初始參數除了本來就要給 EncoderLayer 的參數還多了：
-    # - num_layers: 決定要有幾個 EncoderLayers, 前面影片中的 `N`
-    # - input_vocab_size: 用來把索引轉成詞嵌入向量
     def __init__(self, num_layers, d_model, num_heads, dff, input_vocab_size,
                  rate=0.1):
         super(Encoder, self).__init__()
@@ -230,33 +192,22 @@ class Encoder(tf.keras.layers.Layer):
         self.embedding = tf.keras.layers.Embedding(input_vocab_size, d_model)
         self.pos_encoding = positional_encoding(input_vocab_size, self.d_model)
 
-        # 建立 `num_layers` 個 EncoderLayers
         self.enc_layers = [EncoderLayer(d_model, num_heads, dff, rate)
                            for _ in range(num_layers)]
 
         self.dropout = tf.keras.layers.Dropout(rate)
 
     def call(self, x, training, mask):
-        # 輸入的 x.shape == (batch_size, input_seq_len)
-        # 以下各 layer 的輸出皆為 (batch_size, input_seq_len, d_model)
         input_seq_len = tf.shape(x)[1]
 
-        # 將 2 維的索引序列轉成 3 維的詞嵌入張量，並依照論文乘上 sqrt(d_model)
-        # 再加上對應長度的位置編碼
         x = self.embedding(x)
         x *= tf.math.sqrt(tf.cast(self.d_model, tf.float32))
         x += self.pos_encoding[:, :input_seq_len, :]
 
-        # 對 embedding 跟位置編碼的總合做 regularization
-        # 這在 Decoder 也會做
         x = self.dropout(x, training=training)
 
-        # 通過 N 個 EncoderLayer 做編碼
         for i, enc_layer in enumerate(self.enc_layers):
             x = enc_layer(x, training, mask)
-            # 以下只是用來 demo EncoderLayer outputs
-            # print('-' * 20)
-            # print(f"EncoderLayer {i + 1}'s output:", x)
 
         return x
 
@@ -278,32 +229,20 @@ class DecoderLayer(tf.keras.layers.Layer):
         self.dropout3 = tf.keras.layers.Dropout(rate)
 
     def call(self, x, enc_output, training, combined_mask, inp_padding_mask):
-        # 所有 sub-layers 的主要輸出皆為 (batch_size, target_seq_len, d_model)
-        # enc_output 為 Encoder 輸出序列，shape 為 (batch_size, input_seq_len, d_model)
-        # attn_weights_block_1 則為 (batch_size, num_heads, target_seq_len, target_seq_len)
-        # attn_weights_block_2 則為 (batch_size, num_heads, target_seq_len, input_seq_len)
-
-        # sub-layer 1: Decoder layer 自己對輸出序列做注意力。
-        # 我們同時需要 look ahead mask 以及輸出序列的 padding mask
-        # 來避免前面已生成的子詞關注到未來的子詞以及 <pad>
         attn1, attn_weights_block1 = self.mha1(x, x, x, combined_mask)
         attn1 = self.dropout1(attn1, training=training)
         out1 = self.layernorm1(attn1 + x)
 
-        # sub-layer 2: Decoder layer 關注 Encoder 的最後輸出
-        # 記得我們一樣需要對 Encoder 的輸出套用 padding mask 避免關注到 <pad>
         attn2, attn_weights_block2 = self.mha2(
             enc_output, enc_output, out1, inp_padding_mask)  # (batch_size, target_seq_len, d_model)
         attn2 = self.dropout2(attn2, training=training)
         out2 = self.layernorm2(attn2 + out1)  # (batch_size, target_seq_len, d_model)
 
-        # sub-layer 3: FFN 部分跟 Encoder layer 完全一樣
         ffn_output = self.ffn(out2)  # (batch_size, target_seq_len, d_model)
 
         ffn_output = self.dropout3(ffn_output, training=training)
         out3 = self.layernorm3(ffn_output + out2)  # (batch_size, target_seq_len, d_model)
 
-        # 除了主要輸出 `out3` 以外，輸出 multi-head 注意權重方便之後理解模型內部狀況
         return out3, attn_weights_block1, attn_weights_block2
 
 
@@ -350,7 +289,6 @@ class Transformer(tf.keras.Model):
 
         self.decoder = Decoder(num_layers, d_model, num_heads, dff,
                                target_vocab_size, rate)
-        # 這個 FFN 輸出跟中文字典一樣大的 logits 數，等通過 softmax 就代表每個中文字的出現機率
         self.final_layer = tf.keras.layers.Dense(target_vocab_size)
 
     def call(self, inp, tar, training):
