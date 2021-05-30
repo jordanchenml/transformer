@@ -8,6 +8,17 @@ The project support training and translation with trained model now.
 
 An example of training for the dataset **WMT19_en-zh**.
 
+### Environment setting
+
+```shell
+conda env create -f /path/to/environment.yml
+conda activate transformer
+```
+
+
+
+
+
 - Parameter settings
   - output_dir: Output path.
   - download_dir: Path to store dataset.
@@ -24,7 +35,7 @@ An example of training for the dataset **WMT19_en-zh**.
 
 ### Train the model
 
-```
+```shell
 python train.py \
 --output_dir='./' \
 --download_dir='datasets' \
@@ -42,7 +53,7 @@ python train.py \
 
 ### Evaluate the model
 
-```
+```shell
 python evaluate.py \
 --output_dir='./' \
 --download_dir='datasets' \
